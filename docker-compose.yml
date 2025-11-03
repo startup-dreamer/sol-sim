@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sol-sim-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sol-sim-network
+    restart: unless-stopped
+
+  sol-sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sol-sim-service
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - PORT=8080
+      - REDIS_URL=redis://redis:6379
+      - SOLANA_RPC=https://api.testnet.solana.com
+      - BASE_URL=http://localhost:8080
+    command: >
+      --port 8080
+      --redis-url redis://redis:6379
+      --solana-rpc https://api.testnet.solana.com
+      --base-url http://localhost:8080
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - sol-sim-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  sol-sim-network:
+    driver: bridge

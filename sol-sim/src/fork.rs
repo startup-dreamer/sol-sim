@@ -536,22 +536,48 @@ impl ForkManager {
         svm: &mut LiteSVM,
         params: &Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let pubkey: Pubkey = params
+        let params_array = params
             .as_ref()
-            .and_then(|p| p[0].as_str())
-            .ok_or_else(|| anyhow::anyhow!("Failed to parse the public key"))?
-            .parse()?;
+            .and_then(|p| p.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Invalid params: expected array"))?;
 
-        let accounts = self.fetch_mainnet_accounts(&[pubkey.to_string()]).await?;
-        let clock: Clock = svm.get_sysvar::<Clock>();
-        let current_slot = clock.slot;
+        // Check if we have account data (2 params) or just pubkey (1 param - fetch from mainnet)
+        if params_array.len() == 2 {
+            // Custom account data provided
+            let pubkey: Pubkey = params_array[0]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid pubkey"))?
+                .parse()?;
 
-        // Set all fetched accounts (includes dependencies)
-        for (pk, account) in accounts {
-            svm.set_account(pk, account)?;
+            let account_data: AccountData = serde_json::from_value(params_array[1].clone())
+                .map_err(|e| anyhow::anyhow!("Failed to parse account data: {}", e))?;
+
+            let account = account_data.to_account()?;
+            svm.set_account(pubkey, account)?;
+
+            let clock: Clock = svm.get_sysvar::<Clock>();
+            Ok(json!({"context": {"slot": clock.slot}, "value": null}))
+        } else if params_array.len() == 1 {
+            // Fetch from mainnet
+            let pubkey: Pubkey = params_array[0]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid pubkey"))?
+                .parse()?;
+
+            let accounts = self.fetch_mainnet_accounts(&[pubkey.to_string()]).await?;
+            let clock: Clock = svm.get_sysvar::<Clock>();
+
+            // Set all fetched accounts (includes dependencies)
+            for (pk, account) in accounts {
+                svm.set_account(pk, account)?;
+            }
+
+            Ok(json!({"context": {"slot": clock.slot}, "value": null}))
+        } else {
+            Err(anyhow::anyhow!(
+                "Invalid params: expected 1 param (pubkey) or 2 params (pubkey, accountData)"
+            ))
         }
-
-        Ok(json!({"context": {"slot": current_slot}, "value": null}))
     }
 }
 

@@ -2,7 +2,6 @@ use anyhow::Result;
 use axum::{
     routing::{delete, get, post},
     Router,
-    http::{HeaderMap, Request, Response, StatusCode},
 };
 use clap::Parser;
 use sol_sim::{api, fork::ForkManager, storage::Storage};
@@ -19,12 +18,8 @@ struct Args {
     #[arg(long, default_value = "8080")]
     port: u16,
 
-    /// Redis URL
-    #[arg(long, default_value = "redis://localhost:6379")]
-    redis_url: String,
-
     /// Solana RPC URL (mainnet/testnet/devnet)
-    #[arg(long, default_value = "https://api.testnet.solana.com")]
+    #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
     solana_rpc: String,
 
     /// Base URL for fork RPC endpoints
@@ -38,7 +33,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sol_sim=info".into()),
+                .unwrap_or_else(|_| "sol_sim=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -47,17 +42,10 @@ async fn main() -> Result<()> {
 
     info!("Starting Solana Fork Simulation Engine");
     info!("Port: {}", args.port);
-    info!("Redis: {}", args.redis_url);
     info!("Solana RPC: {}", args.solana_rpc);
 
-    // Initialize storage
-    let storage = Storage::new(&args.redis_url)?;
-
-    // Test Redis connection
-    let client = redis::Client::open(args.redis_url.clone())?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
-    redis::cmd("PING").query_async::<String>(&mut conn).await?;
-    info!("Redis connection established");
+    // Initialize in-memory storage
+    let storage = Storage::new();
 
     // Initialize fork manager
     let manager = Arc::new(ForkManager::new(storage, args.base_url, args.solana_rpc));

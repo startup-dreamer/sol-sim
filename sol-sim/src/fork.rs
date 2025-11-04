@@ -10,7 +10,7 @@ use solana_sysvar::clock::Clock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{debug, error, info, warn};
 
 /// Manages all active forks in-memory
 pub struct ForkManager {
@@ -44,6 +44,10 @@ impl ForkManager {
 
         // Create new liteSVM instance
         let mut svm = LiteSVM::new();
+        info!(
+            "Setting {} accounts in order (program data before programs)",
+            accounts.len()
+        );
         for (pubkey, account) in accounts {
             svm.set_account(pubkey, account)?;
         }
@@ -55,7 +59,7 @@ impl ForkManager {
         let mut forks = self.forks.write().await;
         forks.insert(fork_id.clone(), Arc::new(Mutex::new(svm)));
 
-        // Save metadata to Redis
+        // Save metadata to in-memory storage
         let fork_info = ForkInfo::new(fork_id, &self.base_url);
         self.storage.save_fork(&fork_info).await?;
 
@@ -131,69 +135,236 @@ impl ForkManager {
         svm.set_account(*pubkey, account)?;
         Ok(())
     }
-
-    /// Fetch accounts from mainnet
-    async fn fetch_mainnet_accounts(&self, pubkeys: &[String]) -> Result<HashMap<Pubkey, Account>> {
+    /// Fetch accounts from mainnet recursively, getting all accounts in reverse order of ownership
+    /// Returns Vec to preserve insertion order (program data before programs)
+    async fn fetch_mainnet_accounts(&self, pubkeys: &[String]) -> Result<Vec<(Pubkey, Account)>> {
         if pubkeys.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
+        }
+
+        let mut all_accounts = Vec::new();
+        let mut processed_pubkeys = std::collections::HashSet::new();
+
+        self.fetch_accounts_recursive(pubkeys, &mut all_accounts, &mut processed_pubkeys)
+            .await?;
+
+        // Sort accounts to ensure correct order for liteSVM:
+        // 1. Non-executable accounts first
+        // 2. BPF program data accounts (non-executable, owned by BPF loader)
+        // 3. BPF programs (executable, owned by BPF loader)
+        // 4. Other executable accounts
+        let bpf_loader = "BPFLoaderUpgradeab1e11111111111111111111111"
+            .parse::<Pubkey>()
+            .unwrap();
+
+        all_accounts.sort_by_key(|(_, account)| {
+            let is_bpf_owner = account.owner == bpf_loader;
+            match (account.executable, is_bpf_owner) {
+                (false, false) => 0, // Non-executable, non-BPF
+                (false, true) => 1,  // Program data accounts (must come before programs)
+                (true, true) => 2,   // BPF programs (need program data to be set first)
+                (true, false) => 3,  // Other executable accounts
+            }
+        });
+
+        Ok(all_accounts)
+    }
+
+    /// Recursive helper function to fetch accounts and their dependencies
+    async fn fetch_accounts_recursive(
+        &self,
+        pubkeys: &[String],
+        all_accounts: &mut Vec<(Pubkey, Account)>,
+        processed_pubkeys: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        // Filter out already processed pubkeys
+        let new_pubkeys: Vec<String> = pubkeys
+            .iter()
+            .filter(|pk| !processed_pubkeys.contains(*pk))
+            .cloned()
+            .collect();
+
+        if new_pubkeys.is_empty() {
+            return Ok(());
         }
 
         let client = reqwest::Client::new();
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getMultipleAccounts",
+            "params": [
+                new_pubkeys,
+                {"encoding": "base64", "commitment": "confirmed"}
+            ]
+        });
+
         let response = client
             .post(&self.solana_rpc)
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getMultipleAccounts",
-                "params": [
-                    pubkeys,
-                    {"encoding": "base64", "commitment": "confirmed"}
-                ]
-            }))
+            .json(&request_body)
             .send()
             .await?;
 
         let data: serde_json::Value = response.json().await?;
-        let accounts_data = data["result"]["value"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+        let accounts_data = data["result"]["value"].as_array().ok_or_else(|| {
+            anyhow::anyhow!("Invalid response format: missing result.value array")
+        })?;
 
-        let mut accounts = HashMap::new();
+        info!("Received {} account(s) from API", accounts_data.len());
+
+        let mut non_executable_accounts = Vec::new();
+        let mut executable_accounts = Vec::new();
+        let mut owner_pubkeys = Vec::new();
+        let mut program_data_accounts = Vec::new(); // For BPF Upgradeable programs
+
+        // BPF Upgradeable Loader program ID
+        let bpf_upgradeable_loader = "BPFLoaderUpgradeab1e11111111111111111111111"
+            .parse::<Pubkey>()
+            .unwrap();
+
         for (i, account_data) in accounts_data.iter().enumerate() {
             if account_data.is_null() {
+                warn!(
+                    "Account {} at index {} is null in API response",
+                    new_pubkeys.get(i).unwrap_or(&"unknown".to_string()),
+                    i
+                );
+                processed_pubkeys.insert(new_pubkeys[i].clone());
                 continue;
             }
 
-            let pubkey: Pubkey = pubkeys[i].parse()?;
+            let pubkey: Pubkey = new_pubkeys[i].parse()?;
             let lamports = account_data["lamports"].as_u64().unwrap_or(0);
-            let owner: Pubkey = account_data["owner"].as_str().unwrap_or("").parse()?;
+            let owner_str = account_data["owner"].as_str().unwrap_or("");
+            let owner: Pubkey = owner_str
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Failed to parse owner '{}': {}", owner_str, e))?;
             let executable = account_data["executable"].as_bool().unwrap_or(false);
             let rent_epoch = account_data["rentEpoch"].as_u64().unwrap_or(0);
 
             let data = if let Some(data_array) = account_data["data"].as_array() {
                 if data_array.len() >= 1 {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(data_array[0].as_str().unwrap_or(""))?
+                    let data_str = data_array[0].as_str().unwrap_or("");
+                    info!(
+                        "Account {} data string from API (base64): '{}'",
+                        pubkey, data_str
+                    );
+                    if data_str.is_empty() {
+                        warn!("Account {} data string is EMPTY!", pubkey);
+                        Vec::new()
+                    } else {
+                        match base64::engine::general_purpose::STANDARD.decode(data_str) {
+                            Ok(decoded) => {
+                                info!(
+                                    "Account {} decoded data length: {} bytes",
+                                    pubkey,
+                                    decoded.len()
+                                );
+                                decoded
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to decode base64 data for account {}: {}",
+                                    pubkey, e
+                                );
+                                Vec::new()
+                            }
+                        }
+                    }
                 } else {
+                    warn!("Account {} data array is empty!", pubkey);
                     Vec::new()
                 }
             } else {
+                warn!(
+                    "Account {} data field is not an array: {:?}",
+                    pubkey, account_data["data"]
+                );
                 Vec::new()
             };
 
-            accounts.insert(
-                pubkey,
-                Account {
-                    lamports,
-                    data,
-                    owner,
-                    executable,
-                    rent_epoch,
-                },
+            info!(
+                "Final account {}: lamports={}, data_len={}, owner={}, executable={}, rent_epoch={}",
+                pubkey, lamports, data.len(), owner, executable, rent_epoch
             );
+
+            // Check if this is a BPF Upgradeable program and extract program data account
+            if executable && owner == bpf_upgradeable_loader && data.len() >= 36 {
+                // BPF Upgradeable Program account structure:
+                // - Bytes 0-3: Account discriminator (3 for Program account)
+                // - Bytes 4-35: ProgramData account pubkey (32 bytes)
+                let program_data_bytes: [u8; 32] = data[4..36].try_into().unwrap();
+                let program_data_pubkey = Pubkey::new_from_array(program_data_bytes);
+                let program_data_str = program_data_pubkey.to_string();
+
+                if !processed_pubkeys.contains(&program_data_str) {
+                    info!(
+                        "Found BPF Upgradeable program {}, adding program data account {}",
+                        pubkey, program_data_pubkey
+                    );
+                    program_data_accounts.push(program_data_str);
+                }
+            }
+
+            let account = Account {
+                lamports,
+                data,
+                owner,
+                executable,
+                rent_epoch,
+            };
+
+            // Separate accounts by executable status for reverse order processing
+            if executable {
+                executable_accounts.push((pubkey, account));
+            } else {
+                non_executable_accounts.push((pubkey, account));
+            }
+
+            // Collect owner pubkeys for recursive fetching
+            if owner.to_string() != "11111111111111111111111111111111"
+                && !processed_pubkeys.contains(&owner.to_string())
+            {
+                owner_pubkeys.push(owner.to_string());
+            }
+
+            processed_pubkeys.insert(new_pubkeys[i].clone());
         }
 
-        Ok(accounts)
+        // Process in reverse order: non-executable accounts first (in reverse), then executable accounts (in reverse)
+        for (pubkey, account) in non_executable_accounts.into_iter().rev() {
+            all_accounts.push((pubkey, account));
+        }
+
+        for (pubkey, account) in executable_accounts.into_iter().rev() {
+            all_accounts.push((pubkey, account));
+        }
+
+        // Recursively fetch owner accounts
+        if !owner_pubkeys.is_empty() {
+            Box::pin(self.fetch_accounts_recursive(
+                &owner_pubkeys,
+                all_accounts,
+                processed_pubkeys,
+            ))
+            .await?;
+        }
+
+        // Recursively fetch program data accounts for BPF Upgradeable programs
+        if !program_data_accounts.is_empty() {
+            info!(
+                "Fetching {} program data account(s) for BPF Upgradeable programs",
+                program_data_accounts.len()
+            );
+            Box::pin(self.fetch_accounts_recursive(
+                &program_data_accounts,
+                all_accounts,
+                processed_pubkeys,
+            ))
+            .await?;
+        }
+
+        Ok(())
     }
 
     /// Initialize the fork's chain context from the upstream RPC (slot only; blockhash best-effort).
@@ -303,17 +474,35 @@ impl ForkManager {
 
         match svm.get_account(&pubkey) {
             Some(account) => {
+                if !account.data.is_empty() {
+                    debug!(
+                        "Account {} data (base64): {}",
+                        pubkey,
+                        base64::engine::general_purpose::STANDARD.encode(&account.data)
+                    );
+                } else {
+                    warn!("Account {} retrieved from SVM has EMPTY data!", pubkey);
+                }
+
                 let data = AccountData::from_account(&account);
-                Ok(json!({
+
+                let response = json!({
                     "context": {"slot": current_slot},
                     "value": {
                         "lamports": data.lamports,
                         "owner": data.owner,
                         "data": [data.data, "base64"],
                         "executable": data.executable,
-                        "rentEpoch": 0 // TODO: implement rent epoch
+                        "rentEpoch": account.rent_epoch
                     }
-                }))
+                });
+
+                info!(
+                    "Returning account info response for {}: {}",
+                    pubkey,
+                    serde_json::to_string(&response)?
+                );
+                Ok(response)
             }
             None => Ok(json!({"context": {"slot": current_slot}, "value": null})),
         }
@@ -335,10 +524,10 @@ impl ForkManager {
         let result = svm
             .send_transaction(transaction)
             .map_err(|e| anyhow::anyhow!("Failed to send transaction: {:#?}", e))?;
-        
+
         // Increment slot after transaction
         Self::increment_slot(svm);
-        
+
         Ok(json!(result.signature.to_string()))
     }
 
@@ -357,8 +546,10 @@ impl ForkManager {
         let clock: Clock = svm.get_sysvar::<Clock>();
         let current_slot = clock.slot;
 
-        let account = accounts[&pubkey].clone();
-        svm.set_account(pubkey, account)?;
+        // Set all fetched accounts (includes dependencies)
+        for (pk, account) in accounts {
+            svm.set_account(pk, account)?;
+        }
 
         Ok(json!({"context": {"slot": current_slot}, "value": null}))
     }

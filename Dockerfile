@@ -11,21 +11,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy only Cargo files first for better caching
+# Copy Cargo files first for better caching
 COPY sol-sim/Cargo.toml sol-sim/Cargo.lock ./
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy the actual source code
+# Copy source code
 COPY sol-sim/src ./src
 
-# Build the application
-# Touch to ensure rebuild of main.rs
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release
 
 # Runtime stage
 FROM debian:trixie-slim
@@ -57,5 +49,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Run the application
 ENTRYPOINT ["sol-sim"]
-CMD ["--port", "8080", "--redis-url", "redis://redis:6379", "--base-url", "http://localhost:8080"]
-
+CMD ["--port", "8080", "--base-url", "http://localhost:8080"]

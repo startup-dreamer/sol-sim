@@ -21,10 +21,6 @@ struct Args {
     /// Solana RPC URL (mainnet/testnet/devnet)
     #[arg(long, default_value = "https://api.mainnet-beta.solana.com")]
     solana_rpc: String,
-
-    /// Base URL for fork RPC endpoints
-    #[arg(long, default_value = "http://localhost:8080")]
-    base_url: String,
 }
 
 #[tokio::main]
@@ -48,7 +44,7 @@ async fn main() -> Result<()> {
     let storage = Storage::new();
 
     // Initialize fork manager
-    let manager = Arc::new(ForkManager::new(storage, args.base_url, args.solana_rpc));
+    let manager = Arc::new(ForkManager::new(storage, format!("http://127.0.0.1:{}", args.port), args.solana_rpc));
 
     // Build router
     let app = Router::new()

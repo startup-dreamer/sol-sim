@@ -22,6 +22,7 @@ clap = { version = "4.0", features = ["derive"] }
 litesvm = "0.8.1"
 solana-sdk = "3.0.0"
 solana-client = "3.0.8"
+solana-program = "3.0.0"
 
 # Additional dependencies
 tower = "0.5.2"

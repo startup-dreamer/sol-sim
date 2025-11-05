@@ -60,7 +60,8 @@ impl ForkManager {
         forks.insert(fork_id.clone(), Arc::new(Mutex::new(svm)));
 
         // Save metadata to in-memory storage
-        let fork_info = ForkInfo::new(fork_id, &self.base_url);
+        let account_count = account_pubkeys.len();
+        let fork_info = ForkInfo::new(fork_id, &self.base_url, account_count);
         self.storage.save_fork(&fork_info).await?;
 
         info!("Fork {} created successfully", fork_info.fork_id);

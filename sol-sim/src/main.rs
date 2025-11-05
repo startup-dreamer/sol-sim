@@ -36,6 +36,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Initialize start time for uptime tracking
+    api::init_start_time();
+
     info!("Starting Solana Fork Simulation Engine");
     info!("Port: {}", args.port);
     info!("Solana RPC: {}", args.solana_rpc);
@@ -44,7 +47,11 @@ async fn main() -> Result<()> {
     let storage = Storage::new();
 
     // Initialize fork manager
-    let manager = Arc::new(ForkManager::new(storage, format!("http://127.0.0.1:{}", args.port), args.solana_rpc));
+    let manager = Arc::new(ForkManager::new(
+        storage,
+        format!("http://127.0.0.1:{}", args.port),
+        args.solana_rpc,
+    ));
 
     // Build router
     let app = Router::new()

@@ -32,21 +32,29 @@ pub struct ForkInfo {
     pub rpc_url: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub account_count: usize,
 }
 
 impl ForkInfo {
-    pub fn new(fork_id: ForkId, base_url: &str) -> Self {
+    pub fn new(fork_id: ForkId, base_url: &str, account_count: usize) -> Self {
         let now = chrono::Utc::now();
         Self {
             fork_id: fork_id.clone(),
             rpc_url: format!("{}/rpc/{}", base_url, fork_id),
             created_at: now,
             expires_at: now + chrono::Duration::minutes(15),
+            account_count,
         }
     }
 
     pub fn is_expired(&self) -> bool {
         chrono::Utc::now() > self.expires_at
+    }
+
+    pub fn remaining_minutes(&self) -> i64 {
+        let now = chrono::Utc::now();
+        let duration = self.expires_at.signed_duration_since(now);
+        duration.num_minutes().max(0)
     }
 }
 
@@ -58,12 +66,68 @@ pub struct CreateForkRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateForkResponse {
+    pub success: bool,
     #[serde(rename = "forkId")]
     pub fork_id: String,
     #[serde(rename = "rpcUrl")]
     pub rpc_url: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(rename = "expiresAt")]
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(rename = "accountCount")]
+    pub account_count: usize,
+    #[serde(rename = "ttlMinutes")]
+    pub ttl_minutes: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetForkResponse {
+    pub success: bool,
+    #[serde(rename = "forkId")]
+    pub fork_id: String,
+    #[serde(rename = "rpcUrl")]
+    pub rpc_url: String,
+    pub status: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(rename = "remainingMinutes")]
+    pub remaining_minutes: i64,
+    #[serde(rename = "accountCount")]
+    pub account_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteForkResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(rename = "forkId")]
+    pub fork_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub success: bool,
+    pub status: String,
+    pub version: String,
+    pub uptime: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    pub success: bool,
+    pub error: ErrorDetails,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorDetails {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

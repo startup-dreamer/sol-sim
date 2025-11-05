@@ -8,7 +8,7 @@ A Solana blockchain forking and simulation engine built in Rust. Creates isolate
 - **Isolated Execution**: Each fork is completely isolated with its own state
 - **Transaction Simulation**: Execute transactions and view results without affecting mainnet
 - **Account State Management**: Query and modify account states on forked chains
-- **JSON-RPC Compatible**: Standard Solana RPC methods supported
+- **JSON-RPC Compatible**: Standard Solana RPC methods supported (supported methods: `getBalance`, `getAccountInfo`, `sendTransaction`, `setAccount`, `getLatestBlockhash`)
 - **Automatic Dependency Resolution**: Recursively fetches program dependencies and BPF upgradeable program data
 - **Docker Deployment**: Production-ready containerized deployment
 
@@ -186,7 +186,17 @@ RUST_LOG=debug cargo run
 
 ```bash
 curl http://localhost:8080/health
-# Expected: {"status":"healthy"}
+```
+
+**Expected Response:**
+```json
+{
+  "success": true,
+  "status": "healthy",
+  "version": "0.1.0",
+  "uptime": "5m 23s",
+  "timestamp": "2025-11-05T10:30:00Z"
+}
 ```
 
 ### Docker Deployment
@@ -232,9 +242,13 @@ Content-Type: application/json
 **Response (201 Created):**
 ```json
 {
+  "success": true,
   "forkId": "c6193d87-8e44-4a09-bb61-848dc54dc1dc",
   "rpcUrl": "http://localhost:8080/rpc/c6193d87-8e44-4a09-bb61-848dc54dc1dc",
-  "expiresAt": "2024-11-04T15:30:00Z"
+  "createdAt": "2024-11-04T15:15:00Z",
+  "expiresAt": "2024-11-04T15:30:00Z",
+  "accountCount": 2,
+  "ttlMinutes": 15
 }
 ```
 
@@ -246,10 +260,14 @@ GET /forks/{fork_id}
 **Response (200 OK):**
 ```json
 {
+  "success": true,
   "forkId": "c6193d87-8e44-4a09-bb61-848dc54dc1dc",
   "rpcUrl": "http://localhost:8080/rpc/c6193d87-8e44-4a09-bb61-848dc54dc1dc",
   "status": "active",
-  "expiresAt": "2024-11-04T15:30:00Z"
+  "createdAt": "2024-11-04T15:15:00Z",
+  "expiresAt": "2024-11-04T15:30:00Z",
+  "remainingMinutes": 12,
+  "accountCount": 2
 }
 ```
 
@@ -258,7 +276,36 @@ GET /forks/{fork_id}
 DELETE /forks/{fork_id}
 ```
 
-**Response:** 204 No Content
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "message": "Fork successfully deleted",
+  "forkId": "c6193d87-8e44-4a09-bb61-848dc54dc1dc"
+}
+```
+
+#### Error Response Format
+
+All endpoints return errors in a consistent format:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable error message",
+    "details": "Optional detailed error information"
+  }
+}
+```
+
+**Error Codes:**
+- `INVALID_FORK_ID` - The fork ID format is invalid
+- `FORK_NOT_FOUND` - The fork does not exist or was deleted
+- `FORK_CREATION_FAILED` - Failed to create fork
+- `DELETE_FAILED` - Failed to delete fork
+- `INTERNAL_ERROR` - Internal server error
 
 ### JSON-RPC Methods
 

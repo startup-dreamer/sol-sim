@@ -12,5 +12,4 @@ target/
 .env.local
 .env.development.local
 .env.test.local
-**/*.md
 node_modules/

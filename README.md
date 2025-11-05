@@ -147,9 +147,6 @@ sequenceDiagram
 - `AccountData`: Serializable account state representation
 - JSON-RPC request/response structures
 - API request/response DTOs -->
-6. **rpc.rs** - RPC Utilities
-<!-- - Reserved for additional RPC helper functions
-- Currently minimal as RPC logic is in `fork.rs` -->
 
 ## Setup
 
